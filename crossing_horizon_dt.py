@@ -1,12 +1,15 @@
+import io
 import sys
+import glob
 import warnings
 import numpy as np
 import argparse as ap
 import astropy.units as u
-from os.path import basename
 from astroplan import Observer
 from astropy.io.fits import getheader
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from os.path import basename, join, isfile, isdir
 from astroplan.exceptions import TargetNeverUpWarning
 from astropy.coordinates import EarthLocation, Angle, SkyCoord
 
@@ -46,7 +49,10 @@ UTC_TZ = timezone.utc
 
 def parse_arguments():
     parser = ap.ArgumentParser(prog=__script_name__, description=__script_desc__, formatter_class=ap.RawTextHelpFormatter)
-    parser.add_argument('filename', metavar='FITSFILE', type=str, help='Observed Image FITS filename.')
+    parser.add_argument('--filename', '-f', metavar='FITSFILE', type=str, help='Observed Image FITS filename.')
+    parser.add_argument('--input_dir', '-d', 
+                        metavar='DIR', default=None, type=str, 
+                        help='Check all FITS files from the same directory. If --filename is passed, --date will be ignored.')
     parser.add_argument('--header_date', '-D', metavar='HEADERCARD', default='DATE-OBS', type=str, 
                         help='FITS header card used to get datetime. Defaults to DATE-OBS.')
     parser.add_argument('--plot', '-p', action='store_true', default=False, 
@@ -55,13 +61,38 @@ def parse_arguments():
                         help='Creates the timeline centred in header card used to retrieve the datetime. Defaults to 10 min.')
     parser.add_argument('--n_grid_points', '-n', metavar='INT', type=int, default=1800,
                         help='Number of bins passed to astroplan module for the timeline creation. Defaults to 1800')
+    parser.add_argument('--output', '-o', metavar='FILENAME', default=None, help='Outputs to file (open mode will be set to append). Defaults to None.')
     args = parser.parse_args(args=sys.argv[1:])
 
     # Parse arguments
-    if 'bias' in args.filename:            
-        raise NotImplementedError(f'{__script_name__}: {args.filename}: bias file')
-    if 'skyflat' in args.filename:            
-        raise NotImplementedError(f'{__script_name__}: {args.filename}: skyflat file')
+    if ((args.filename is None) & (args.input_dir is None)):
+        parser.print_help()
+        print(f'{__script_name__}: need --filename FILENAME or --input_dir DIR')
+        sys.exit(2)
+
+    if args.filename is not None:
+        if not isfile(args.filename):
+            raise FileNotFoundError(f'{__script_name__}: {args.filename}: file not exists')
+        if 'bias' in args.filename:            
+            raise NotImplementedError(f'{__script_name__}: {args.filename}: bias file')
+        if 'skyflat' in args.filename:            
+            raise NotImplementedError(f'{__script_name__}: {args.filename}: skyflat file')
+
+    if args.input_dir is not None:
+        if not isdir(args.input_dir):
+            print(f'{__script_name__}: {args.input_dir}: directory does not exists')
+            sys.exit(2)
+        args.imgwildcard = join(args.input_dir, '*.fits.fz')
+        args.imgglob = glob.glob(args.imgwildcard)
+        nfiles = len(args.imgglob)
+        if nfiles == 0:
+            print(f'{__script_name__}: {args.imgwildcard}: files not found')
+            sys.exit(2)
+        args.imgglob = [x for x in args.imgglob if not (('bias' in x) | ('skyflat' in x))]
+
+    if args.output is None:
+        args.output = sys.stdout
+
     args.delta_time *= u.min
     return args
 
@@ -224,11 +255,33 @@ def get_alt_dt(filename, dt_card=None, delta_time=None, n_grid_points=None, plot
 if __name__ == '__main__':
     args = parse_arguments()
 
-    final_message = get_alt_dt(
-        filename=args.filename, 
-        dt_card=args.header_date, 
-        delta_time=args.delta_time, 
-        n_grid_points=args.n_grid_points,
-        plot=args.plot,
-    )
-    print(final_message)
+    if args.filename is not None:
+        final_message = get_alt_dt(
+            filename=args.filename, 
+            dt_card=args.header_date, 
+            delta_time=args.delta_time, 
+            n_grid_points=args.n_grid_points,
+            plot=args.plot,
+        )
+        print(final_message)
+    else:
+        close_f = True
+        if isinstance(args.output, io.TextIOWrapper):
+            f = args.output
+            close_f = False
+        else:
+            f = open(args.output, 'a')
+        with redirect_stdout(f):
+            print('FILENAME,OBJNAME,FILTER,DATETIME,DIFFTIME')
+            for filename in args.imgglob:
+                final_message = get_alt_dt(
+                    filename=filename, 
+                    dt_card=args.header_date, 
+                    delta_time=args.delta_time, 
+                    n_grid_points=args.n_grid_points,
+                    plot=args.plot,
+                )
+                print(final_message)
+        if close_f:
+            f.close()
+
